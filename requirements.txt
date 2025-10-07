@@ -5,3 +5,5 @@ numpy
 diffusers[torch]==0.11.1
 transformers
 torch
+accelerate
+safetensors
