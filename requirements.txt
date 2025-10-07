@@ -2,8 +2,9 @@ streamlit
 pillow
 requests
 numpy
-diffusers[torch]==0.11.1
-transformers
-torch
+torch==1.13.1
+transformers==4.25.1
+diffusers==0.11.1
+huggingface_hub==0.12.1
 accelerate
 safetensors
