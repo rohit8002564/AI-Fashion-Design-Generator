@@ -1,58 +1,52 @@
 import streamlit as st
 from diffusers import StableDiffusionPipeline
 import torch
-import requests
 from PIL import Image
-from io import BytesIO
+import io
 
-# --- Load Stable Diffusion Model ---
+# --- Page Config ---
+st.set_page_config(page_title="AI Fashion Design Generator", layout="wide")
+
+# --- Title ---
+st.title("👗 AI Fashion Design Generator")
+st.markdown("Generate stunning fashion designs using AI. Powered by Stable Diffusion + Streamlit.")
+
+# --- Sidebar ---
+st.sidebar.header("🛠️ Design Controls")
+prompt = st.sidebar.text_input("Enter your fashion prompt", value="A futuristic evening gown with metallic textures")
+guidance_scale = st.sidebar.slider("Creativity (Guidance Scale)", 1.0, 20.0, 7.5)
+num_inference_steps = st.sidebar.slider("Inference Steps", 10, 100, 50)
+
+# --- Load Model ---
 @st.cache_resource
 def load_model():
-    model = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    return model.to(device)
+    pipe = StableDiffusionPipeline.from_pretrained(
+        "CompVis/stable-diffusion-v1-4",
+        torch_dtype=torch.float32
+    ).to(device)
+    return pipe
 
-pipe = load_model()
+with st.spinner("Loading Stable Diffusion model..."):
+    try:
+        pipe = load_model()
+    except Exception as e:
+        st.error("❌ Failed to load model. Check your requirements or Streamlit logs.")
+        st.stop()
 
-# --- Generate Image from Prompt ---
-def generate_image(prompt):
-    image = pipe(prompt).images[0]
-    return image
+# --- Generate Image ---
+if st.button("🎨 Generate Fashion Design"):
+    with st.spinner("Generating image..."):
+        image = pipe(prompt, guidance_scale=guidance_scale, num_inference_steps=num_inference_steps).images[0]
+        st.image(image, caption="Generated Design", use_column_width=True)
 
-# --- Search Similar Products via SerpAPI ---
-def search_products(query):
-    api_key = "1aadff5156d5c16d10cd8d25e948d22945afcab63583eb9ce2e0db3d030dd906"  # Replace with your actual key
-    url = f"https://serpapi.com/search.json?q={query}&tbm=shop&api_key={api_key}"
-    response = requests.get(url)
-    results = response.json().get("shopping_results", [])
-    return results
-
-# --- Streamlit UI ---
-st.set_page_config(page_title="AI Fashion Design Generator", layout="centered")
-st.title("👗 AI Fashion Design Generator")
-st.markdown("Describe your fashion idea and let AI bring it to life!")
-
-prompt = st.text_input("📝 Enter your fashion prompt:", placeholder="e.g. A futuristic streetwear hoodie")
-
-if st.button("🎨 Generate Design"):
-    if prompt:
-        with st.spinner("Generating your fashion design..."):
-            image = generate_image(prompt)
-            st.image(image, caption="🖼️ Your AI-Generated Design", use_column_width=True)
-
-            st.subheader("🛍️ Similar Products Online")
-            products = search_products(prompt)
-            if products:
-                for product in products[:5]:
-                    st.markdown(f"**{product.get('title', 'No Title')}**")
-                    if product.get("thumbnail"):
-                        st.image(product["thumbnail"], width=150)
-                    st.write(product.get("link", "No Link"))
-            else:
-                st.info("No similar products found. Try refining your prompt.")
-    else:
-        st.warning("Please enter a fashion prompt to begin.")
-
-# --- Footer ---
-st.markdown("---")
-st.caption("Built with ❤️ by Rohit Kumar | Powered by Stable Diffusion + Streamlit")
+        # --- Download Button ---
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        byte_im = buf.getvalue()
+        st.download_button(
+            label="📥 Download Image",
+            data=byte_im,
+            file_name="fashion_design.png",
+            mime="image/png"
+        )
