@@ -8,7 +8,7 @@ from PIL import Image
 import os
 
 # --- Configuration ---
-API_KEY = os.getenv("IMAGEN_API_KEY") or "AIzaSyDODlUSG7KKovWIO9MpNIXIcHp_ZQ0oj30"  # Replace with your key or use env variable
+API_KEY = os.getenv("IMAGEN_API_KEY") or "AIzaSyD-8R9WxuyFijbnCqnHkXEMIELPTlZqZFo"  # Replace with your key or use env variable
 MODEL_NAME = "imagen-3.0-generate-002"
 API_BASE_URL = "https://api.generativelanguage.googleapis.com/v1beta2/models/"
 API_URL = f"{API_BASE_URL}{MODEL_NAME}:predict?key={API_KEY}"
