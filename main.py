@@ -5,6 +5,23 @@ import torch
 from diffusers import StableDiffusionPipeline
 import os
 import random
+import numpy as np
+
+# -------------------------
+# --- Helper Functions for Seed ---
+# -------------------------
+def set_seed(seed):
+    """Sets the seed for reproducibility across torch and numpy."""
+    if seed is not None:
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+    else:
+        # If no seed provided, use a random seed for the generator
+        return random.randint(0, 2**32 - 1)
+    return seed
 
 # -------------------------
 # --- Load Stable Diffusion Model ---
@@ -36,7 +53,7 @@ pipe = load_model()
 # -------------------------
 # --- AI Image Generation ---
 # -------------------------
-def generate_fashion_images(prompt, negative_prompt="", num_images=5, steps=50, scale=7.5):
+def generate_fashion_images(prompt, negative_prompt="", num_images=5, steps=50, scale=7.5, seed=None):
     """
     Generates fashion images using the Stable Diffusion pipeline with custom parameters.
     :param prompt: The positive text prompt.
@@ -44,9 +61,22 @@ def generate_fashion_images(prompt, negative_prompt="", num_images=5, steps=50, 
     :param num_images: Number of images to generate (must be <= 5 for columns).
     :param steps: Number of inference steps (quality/time control).
     :param scale: Classifier-free guidance scale (prompt adherence control).
+    :param seed: The random seed for reproducibility.
     """
     images = []
-    for _ in range(num_images):
+    
+    # 1. Set the seed for generation and create the PyTorch generator
+    if seed is None or seed == 0:
+        actual_seed = random.randint(0, 2**32 - 1)
+    else:
+        actual_seed = seed
+        
+    generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(actual_seed)
+    
+    # Store the seed in the session state for display after generation
+    st.session_state['last_seed'] = actual_seed
+
+    for i in range(num_images):
         try:
             # Prepare arguments for the pipeline call
             pipeline_kwargs = {
@@ -54,6 +84,9 @@ def generate_fashion_images(prompt, negative_prompt="", num_images=5, steps=50, 
                 "negative_prompt": negative_prompt,
                 "num_inference_steps": steps,
                 "guidance_scale": scale,
+                # Pass a unique generator for each image if we want slight variation
+                # But for true reproducibility with a single seed, we pass the same generator
+                "generator": generator 
             }
 
             if torch.cuda.is_available():
@@ -63,7 +96,7 @@ def generate_fashion_images(prompt, negative_prompt="", num_images=5, steps=50, 
                 image = pipe(**pipeline_kwargs).images[0]
             images.append(image)
         except Exception as e:
-            st.error(f"Image generation failed: {e}")
+            st.error(f"Image generation failed on instance {i+1}: {e}")
             break
     return images
 
@@ -113,6 +146,10 @@ st.set_page_config(page_title="AI Fashion Design Generator", layout="wide")
 st.title("🎨 AI Fashion Design Generator")
 st.write("Type a fashion design idea below and generate **AI-based clothing designs instantly!**")
 
+# Initialize session state for seed display
+if 'last_seed' not in st.session_state:
+    st.session_state['last_seed'] = "N/A"
+
 # --- UI CONTROLS: Sidebar for Advanced Settings ---
 with st.sidebar:
     st.header("⚙️ Advanced Generation Settings")
@@ -126,21 +163,32 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # 2. Number of Images (Max 5 for current column layout)
+    # 2. Seed Input (New Addition)
+    user_seed = st.number_input(
+        "🎲 Seed (0 for Random)",
+        min_value=0, max_value=2**32 - 1, value=0, step=1,
+        help="Use a fixed number to reproduce the exact same design. Use 0 for a new random design."
+    )
+    st.caption(f"Last Generated Seed: **{st.session_state['last_seed']}**")
+    
+    st.markdown("---")
+
+
+    # 3. Number of Images (Max 5 for current column layout)
     num_images = st.slider(
         "Number of Designs to Generate",
         min_value=1, max_value=5, value=3, step=1,
         help="Controls how many designs are created in one batch (max 5)."
     )
 
-    # 3. Inference Steps
+    # 4. Inference Steps
     inference_steps = st.slider(
         "Quality (Inference Steps)",
         min_value=20, max_value=100, value=50, step=5,
         help="Higher values increase quality but significantly increase generation time."
     )
 
-    # 4. Guidance Scale
+    # 5. Guidance Scale
     guidance_scale = st.slider(
         "Prompt Adherence (Guidance Scale)",
         min_value=1.0, max_value=20.0, value=7.5, step=0.5,
@@ -158,14 +206,19 @@ if st.button("✨ Generate Designs"):
     elif prompt.strip() == "":
         st.warning("Please enter a valid prompt!")
     else:
+        # Reset seed display if we use a random seed
+        if user_seed == 0:
+            st.session_state['last_seed'] = "Randomizing..."
+            
         with st.spinner(f"🧵 Generating {num_images} designs... Please wait (time depends on steps)..."):
-            # Pass custom parameters, including the new negative prompt, to the generation function
+            # Pass seed to the generation function
             images = generate_fashion_images(
                 prompt,
                 negative_prompt=negative_prompt, 
                 num_images=num_images,
                 steps=inference_steps,
-                scale=guidance_scale
+                scale=guidance_scale,
+                seed=user_seed
             )
 
             if not images:
@@ -175,6 +228,8 @@ if st.button("✨ Generate Designs"):
                 os.makedirs(save_folder, exist_ok=True)
 
                 st.subheader("👗 Generated Fashion Designs:")
+                st.info(f"Seed used for this batch: **{st.session_state['last_seed']}** (Copy this number to recreate these designs exactly!)")
+                
                 # Determine columns based on the number of images generated
                 cols = st.columns(num_images if num_images <= 3 else 3)
                 
