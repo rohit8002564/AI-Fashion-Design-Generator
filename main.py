@@ -1,261 +1,273 @@
 import streamlit as st
-from PIL import Image
+import requests
+import base64
+import json
+import time
 from io import BytesIO
-import torch
-from diffusers import StableDiffusionPipeline
-import os
-import random
-import numpy as np
+from PIL import Image
 
-# -------------------------
-# --- Helper Functions for Seed ---
-# -------------------------
-def set_seed(seed):
-    """Sets the seed for reproducibility across torch and numpy."""
-    if seed is not None:
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-        np.random.seed(seed)
-        random.seed(seed)
-    else:
-        # If no seed provided, use a random seed for the generator
-        return random.randint(0, 2**32 - 1)
-    return seed
+# --- Firebase Placeholder (Mandatory Context setup) ---
+# Since this is a standalone Python script for Streamlit, we define these 
+# variables as placeholders. In a web environment, they would be injected.
+__app_id = "ai-fashion-design-app"
+__firebase_config = "{}"
+__initial_auth_token = ""
 
-# -------------------------
-# --- Load Stable Diffusion Model ---
-# -------------------------
-@st.cache_resource(show_spinner=True)
-def load_model():
-    try:
-        st.write("🔄 Loading Stable Diffusion model... This may take a minute...")
-        pipe = StableDiffusionPipeline.from_pretrained(
-            "runwayml/stable-diffusion-v1-5",
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            safety_checker=None # Disable NSFW filter blocking images silently
-        )
-        # Safety override
-        pipe.safety_checker = lambda images, **kwargs: (images, False)
-        
-        if torch.cuda.is_available():
-            pipe = pipe.to("cuda")
-            st.success("✅ Model loaded on GPU!")
-        else:
-            st.info("⚙️ Running on CPU mode (slower but works fine).")
-        return pipe
-    except Exception as e:
-        st.error(f"❌ Error loading model: {e}")
-        return None
+# --- Configuration ---
+# API Key is expected to be provided by the runtime environment 
+# (e.g., set via environment variable or provided by the canvas).
+# We leave it empty here as per instructions for Canvas/Immersive environments.
+API_KEY = "" # The Canvas environment will inject the key
 
-pipe = load_model()
+# Model and Endpoint Configuration
+MODEL_NAME = "imagen-3.0-generate-002"
+API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
+API_URL = f"{API_BASE_URL}{MODEL_NAME}:predict?key={API_KEY}"
+MAX_RETRIES = 5
 
-# -------------------------
-# --- AI Image Generation ---
-# -------------------------
-def generate_fashion_images(prompt, negative_prompt="", num_images=5, steps=50, scale=7.5, seed=None):
+# --- Utility Functions ---
+
+def generate_image(prompt, aspect_ratio="1:1", num_images=1, max_retries=MAX_RETRIES):
     """
-    Generates fashion images using the Stable Diffusion pipeline with custom parameters.
-    :param prompt: The positive text prompt.
-    :param negative_prompt: The prompt describing elements to avoid.
-    :param num_images: Number of images to generate (must be <= 5 for columns).
-    :param steps: Number of inference steps (quality/time control).
-    :param scale: Classifier-free guidance scale (prompt adherence control).
-    :param seed: The random seed for reproducibility.
+    Calls the Imagen 3.0 API to generate a fashion image.
+    Implements exponential backoff for request retries.
+    
+    Args:
+        prompt (str): The text description of the fashion design.
+        aspect_ratio (str): The aspect ratio (e.g., "1:1", "3:4").
+        num_images (int): The number of images to generate (1 to 4).
+    
+    Returns:
+        tuple: (list of base64 image strings, error message string or None)
     """
-    images = []
     
-    # 1. Set the seed for generation and create the PyTorch generator
-    if seed is None or seed == 0:
-        actual_seed = random.randint(0, 2**32 - 1)
-    else:
-        actual_seed = seed
-        
-    generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(actual_seed)
-    
-    # Store the seed in the session state for display after generation
-    st.session_state['last_seed'] = actual_seed
+    # 1. Enhance the prompt for fashion design
+    full_prompt = (
+        f"A hyper-realistic, high-fashion runway photograph of a garment based on this description: "
+        f"'{prompt}'. Focus on texture, stitching, and dramatic lighting. The background should be minimalist."
+    )
 
-    for i in range(num_images):
+    # 2. Construct the API Payload
+    payload = {
+        "instances": {
+            "prompt": full_prompt,
+        },
+        "parameters": {
+            "sampleCount": num_images, # Accepts the new parameter
+            "aspectRatio": aspect_ratio,
+            "outputMimeType": "image/jpeg"
+        }
+    }
+    
+    headers = {'Content-Type': 'application/json'}
+    
+    # 3. Request with Exponential Backoff
+    for attempt in range(max_retries):
         try:
-            # Prepare arguments for the pipeline call
-            pipeline_kwargs = {
-                "prompt": prompt,
-                "negative_prompt": negative_prompt,
-                "num_inference_steps": steps,
-                "guidance_scale": scale,
-                # Pass a unique generator for each image if we want slight variation
-                # But for true reproducibility with a single seed, we pass the same generator
-                "generator": generator 
-            }
-
-            if torch.cuda.is_available():
-                with torch.autocast("cuda"):
-                    image = pipe(**pipeline_kwargs).images[0]
-            else:
-                image = pipe(**pipeline_kwargs).images[0]
-            images.append(image)
-        except Exception as e:
-            st.error(f"Image generation failed on instance {i+1}: {e}")
-            break
-    return images
-
-# -------------------------
-# --- Similar Products Mock ---
-# -------------------------
-def get_similar_products(prompt):
-    """
-    Mocks similar products based on keywords found in the user's prompt.
-    """
-    prompt_lower = prompt.lower()
-    
-    # Define keywords for customization
-    colors = ["red", "blue", "green", "black", "white", "yellow", "pink"]
-    types = ["dress", "shirt", "pants", "jacket", "skirt", "suit", "sneakers"]
-    styles = ["floral", "sequins", "denim", "wool", "silk", "leather", "cotton"]
-    
-    found_color = next((c for c in colors if c in prompt_lower), "navy")
-    found_type = next((t for t in types if t in prompt_lower), "item")
-    found_style = next((s for s in styles if s in prompt_lower), "classic")
-    
-    # Generate dynamic mock products
-    products = []
-    
-    # Product 1: Directly matches main keywords
-    title_1 = f"{found_color.capitalize()} {found_style.capitalize()} {found_type.capitalize()}"
-    products.append({"title": title_1, "link": "https://example.com/match1", "price": f"${random.randint(40, 150)}"})
-
-    # Product 2: Uses a related color and different style
-    related_color = random.choice([c for c in colors if c != found_color] + [found_color])
-    related_style = random.choice([s for s in styles if s != found_style] + [found_style])
-    title_2 = f"{related_color.capitalize()} {related_style.capitalize()} {found_type.capitalize()}"
-    products.append({"title": title_2, "link": "https://example.com/match2", "price": f"${random.randint(50, 160)}"})
-
-    # Product 3: Different item type and style
-    different_type = random.choice([t for t in types if t != found_type] + [found_type])
-    title_3 = f"Affordable {different_type.capitalize()} Collection"
-    products.append({"title": title_3, "link": "https://example.com/match3", "price": f"${random.randint(30, 99)}"})
-    
-    return products
-
-# -------------------------
-# --- Streamlit UI ---
-# -------------------------
-st.set_page_config(page_title="AI Fashion Design Generator", layout="wide")
-
-st.title("🎨 AI Fashion Design Generator")
-st.write("Type a fashion design idea below and generate **AI-based clothing designs instantly!**")
-
-# Initialize session state for seed display
-if 'last_seed' not in st.session_state:
-    st.session_state['last_seed'] = "N/A"
-
-# --- UI CONTROLS: Sidebar for Advanced Settings ---
-with st.sidebar:
-    st.header("⚙️ Advanced Generation Settings")
-    
-    # 1. Negative Prompt 
-    negative_prompt = st.text_area(
-        "🚫 Negative Prompt (What to Exclude)",
-        value="blurry, low quality, deformed, extra limbs, bad anatomy, ugly, tiling, cropped",
-        help="Enter details you want the model to avoid in the image."
-    )
-
-    st.markdown("---")
-
-    # 2. Seed Input (New Addition)
-    user_seed = st.number_input(
-        "🎲 Seed (0 for Random)",
-        min_value=0, max_value=2**32 - 1, value=0, step=1,
-        help="Use a fixed number to reproduce the exact same design. Use 0 for a new random design."
-    )
-    st.caption(f"Last Generated Seed: **{st.session_state['last_seed']}**")
-    
-    st.markdown("---")
-
-
-    # 3. Number of Images (Max 5 for current column layout)
-    num_images = st.slider(
-        "Number of Designs to Generate",
-        min_value=1, max_value=5, value=3, step=1,
-        help="Controls how many designs are created in one batch (max 5)."
-    )
-
-    # 4. Inference Steps
-    inference_steps = st.slider(
-        "Quality (Inference Steps)",
-        min_value=20, max_value=100, value=50, step=5,
-        help="Higher values increase quality but significantly increase generation time."
-    )
-
-    # 5. Guidance Scale
-    guidance_scale = st.slider(
-        "Prompt Adherence (Guidance Scale)",
-        min_value=1.0, max_value=20.0, value=7.5, step=0.5,
-        help="Higher values make the image follow the prompt more strictly, but can sometimes look less natural."
-    )
-    st.markdown("---")
-    st.info("Adjust these settings to refine your AI designs!")
-
-# --- Main Prompt Input ---
-prompt = st.text_input("💬 Enter your fashion design prompt (e.g., 'A red floral evening gown with sequins')")
-
-if st.button("✨ Generate Designs"):
-    if not pipe:
-        st.error("Model not loaded properly. Please restart the app.")
-    elif prompt.strip() == "":
-        st.warning("Please enter a valid prompt!")
-    else:
-        # Reset seed display if we use a random seed
-        if user_seed == 0:
-            st.session_state['last_seed'] = "Randomizing..."
+            response = requests.post(API_URL, headers=headers, data=json.dumps(payload))
+            response.raise_for_status() # Raise exception for bad status codes (4xx or 5xx)
             
-        with st.spinner(f"🧵 Generating {num_images} designs... Please wait (time depends on steps)..."):
-            # Pass seed to the generation function
-            images = generate_fashion_images(
-                prompt,
-                negative_prompt=negative_prompt, 
-                num_images=num_images,
-                steps=inference_steps,
-                scale=guidance_scale,
-                seed=user_seed
+            result = response.json()
+            
+            # Check for generated image data - return the list of base64 images
+            predictions = result.get('predictions', [])
+            b64_images = [p['bytesBase64Encoded'] for p in predictions if p.get('bytesBase64Encoded')]
+            
+            if b64_images:
+                return b64_images, None # Returns a list of base64 strings
+            
+            return None, "API returned successfully but no image data was found in the response structure. This may be due to safety filters."
+
+        except requests.exceptions.HTTPError as e:
+            # Handle specific HTTP errors (like 429 rate limit or 5xx server errors)
+            st.warning(f"HTTP Error on attempt {attempt + 1}/{max_retries}: {e}")
+            if attempt < max_retries - 1:
+                delay = 2 ** attempt
+                time.sleep(delay)
+            else:
+                return None, f"Failed after {max_retries} attempts due to HTTP error: {e}"
+        except requests.exceptions.RequestException as e:
+            # Handle connection errors, timeouts, etc.
+            return None, f"A network error occurred: {e}"
+        except Exception as e:
+            # Handle JSON parsing errors or unexpected structure issues
+            return None, f"An unexpected error occurred during API processing: {e}"
+
+    return None, "Image generation request failed."
+
+
+# --- Streamlit App ---
+
+def render_similar_products_simulation(design_prompt):
+    """Simulates a search for similar products based on the generated design."""
+    st.markdown("---")
+    st.subheader("🛍️ Find Similar Affordable Products")
+    
+    # Simple prompt analysis simulation
+    keywords = design_prompt.lower().split()
+    if 'dress' in keywords or 'gown' in keywords:
+        product_type = "Cocktail Dress"
+        link_text = "View Elegant Dresses"
+    elif 'jacket' in keywords or 'coat' in keywords:
+        product_type = "Trench Coat"
+        link_text = "Browse Outerwear"
+    elif 'shirt' in keywords or 'top' in keywords:
+        product_type = "Silk Blouse"
+        link_text = "Shop Tops"
+    else:
+        product_type = "Modern Apparel"
+        link_text = "Explore New Arrivals"
+
+    st.info(
+        f"**Simulated Search Result:** We analyzed your design for a **{product_type}**. "
+        f"In a real app, this would query e-commerce platforms using image features."
+    )
+
+    col1, col2, col3 = st.columns(3)
+    
+    # Placeholder product cards
+    products = [
+        {"id": 1, "name": f"Affordable {product_type}", "price": "$49.99", "link": "#", "placeholder": "https://placehold.co/150x200/4c4c4c/ffffff?text=Product+A"},
+        {"id": 2, "name": "Designer Lookalike", "price": "$65.00", "link": "#", "placeholder": "https://placehold.co/150x200/6b6b6b/ffffff?text=Product+B"},
+        {"id": 3, "name": "Clearance Item", "price": "$29.95", "link": "#", "placeholder": "https://placehold.co/150x200/8d8d8d/ffffff?text=Product+C"},
+    ]
+    
+    for i, (col, product) in enumerate(zip([col1, col2, col3], products)):
+        with col:
+            st.image(product['placeholder'], caption=product['name'], use_column_width="always")
+            st.markdown(f"**{product['price']}**")
+            # Added a unique key for the button to prevent Streamlit warning
+            st.button(f"Buy Now (P{i+1})", key=f"buy_{product['id']}_{i}", use_container_width=True)
+            
+
+def app():
+    """Main Streamlit application function."""
+    
+    # 1. Page Configuration and Styling
+    st.set_page_config(
+        page_title="AI Fashion Studio",
+        layout="wide",
+        initial_sidebar_state="auto"
+    )
+
+    st.title("👗 AI Fashion Design Studio")
+    st.caption("Generate unique garment designs using Google's Imagen 3.0 model.")
+
+    # 2. Input Section
+    with st.form(key='design_form'):
+        prompt = st.text_area(
+            "Describe your dream garment or collection piece:",
+            placeholder="A futuristic, asymmetrical silk gown in deep emerald green, with metallic silver stitching and a geometric neckline.",
+            height=150,
+            key='user_prompt'
+        )
+        
+        col_ar, col_num = st.columns(2) # New columns for Aspect Ratio and Count
+        
+        with col_ar:
+            aspect_ratio = st.selectbox(
+                "Select Design Aspect Ratio:",
+                options=["1:1 (Square)", "3:4 (Portrait)", "16:9 (Landscape)"],
+                index=1 # Default to portrait for fashion
+            ).split(" ")[0]
+            
+        with col_num:
+            num_images = st.slider(
+                "Number of Images to Generate (Max 4):",
+                min_value=1,
+                max_value=4,
+                value=1,
+                step=1
             )
 
-            if not images:
-                st.error("No images generated! Try another prompt or check your setup.")
-            else:
-                save_folder = "generated_designs"
-                os.makedirs(save_folder, exist_ok=True)
+        submit_button = st.form_submit_button(
+            label='✨ Generate Design', 
+            type="primary"
+        )
 
-                st.subheader("👗 Generated Fashion Designs:")
-                st.info(f"Seed used for this batch: **{st.session_state['last_seed']}** (Copy this number to recreate these designs exactly!)")
+    # 3. Generation Logic
+    if submit_button and prompt:
+        with st.spinner(f'🎨 Drafting {num_images} designs... This may take up to 30 seconds per request.'):
+            # Clear previous results
+            st.session_state['generated_images_b64'] = None # Updated key name for clarity (list of images)
+            st.session_state['generation_error'] = None
+            
+            b64_images, error = generate_image(prompt, aspect_ratio, num_images) # Pass num_images
+            
+            st.session_state['generated_images_b64'] = b64_images
+            st.session_state['generation_error'] = error
+            st.session_state['last_prompt'] = prompt
+            st.session_state['last_aspect_ratio'] = aspect_ratio
+            st.session_state['last_num_images'] = num_images
+
+    # 4. Display Results
+    
+    # Initialize session state keys if they don't exist
+    if 'generated_images_b64' not in st.session_state:
+        st.session_state['generated_images_b64'] = None
+    if 'generation_error' not in st.session_state:
+        st.session_state['generation_error'] = None
+    if 'last_prompt' not in st.session_state:
+        st.session_state['last_prompt'] = None
+    if 'last_aspect_ratio' not in st.session_state: 
+        st.session_state['last_aspect_ratio'] = "1:1"
+    if 'last_num_images' not in st.session_state:
+        st.session_state['last_num_images'] = 1
+
+
+    if st.session_state['generation_error']:
+        st.error(f"Design Generation Error: {st.session_state['generation_error']}")
+    
+    if st.session_state['generated_images_b64']: 
+        
+        b64_images = st.session_state['generated_images_b64']
+        
+        st.subheader(f"Your AI-Generated Designs ({len(b64_images)} Options)")
+        
+        # Display meta-information once
+        col_meta1, col_meta2, col_meta3 = st.columns(3)
+        with col_meta1:
+            st.info(f"**Prompt:** {st.session_state['last_prompt']}")
+        with col_meta2:
+            st.info(f"**Model:** `{MODEL_NAME}`")
+        with col_meta3:
+            st.info(f"**Aspect Ratio:** `{st.session_state['last_aspect_ratio']}`")
+
+        # Create columns for the generated images (up to 4)
+        cols = st.columns(len(b64_images))
+        
+        for i, b64_data in enumerate(b64_images):
+            try:
+                # Decode base64 string to bytes
+                image_bytes = base64.b64decode(b64_data)
                 
-                # Determine columns based on the number of images generated
-                cols = st.columns(num_images if num_images <= 3 else 3)
+                # Use BytesIO and PIL to open the image
+                image_file = BytesIO(image_bytes)
+                img = Image.open(image_file)
                 
-                for idx, image in enumerate(images):
-                    with cols[idx % len(cols)]:
-                        st.image(image, caption=f"Design {idx+1}", use_column_width=True)
+                with cols[i]:
+                    st.image(img, caption=f"Option {i+1}", use_column_width=True)
+                    
+                    # Add a download button for each image
+                    st.download_button(
+                        label=f"📥 Download {i+1}",
+                        data=image_bytes,
+                        file_name=f"ai_fashion_design_option_{i+1}.jpg",
+                        mime="image/jpeg",
+                        key=f"download_{i}", # Unique key for each button
+                        use_container_width=True
+                    )
+            
+            except Exception as e:
+                with cols[i]:
+                    st.error(f"Error decoding image {i+1}: {e}")
+                    st.info("Check the console for API response details.")
 
-                        # Save locally (Note: This is mock save functionality in Streamlit environments)
-                        image_path = os.path.join(save_folder, f"design_{idx+1}.png")
-                        image.save(image_path)
+        # 5. Simulated E-commerce Search (Use the last prompt)
+        st.markdown("---")
+        render_similar_products_simulation(st.session_state['last_prompt'])
 
-                        # Download button
-                        buf = BytesIO()
-                        image.save(buf, format="PNG")
-                        st.download_button(
-                            label=f"Download Design {idx+1}",
-                            data=buf.getvalue(),
-                            file_name=f"fashion_design_{idx+1}.png",
-                            mime="image/png"
-                        )
 
-                # Show similar products
-                st.subheader("🛍️ Similar Affordable Products:")
-                products = get_similar_products(prompt)
-                for prod in products:
-                    st.markdown(f"[{prod['title']}]({prod['link']}) — **{prod['price']}**")
-
-st.markdown("---")
-st.caption("Made with ❤️ using Streamlit and Stable Diffusion")
+if __name__ == '__main__':
+    # Streamlit app startup
+    app()
