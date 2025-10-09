@@ -21,7 +21,7 @@ API_KEY = "" # The Canvas environment will inject the key
 
 # Model and Endpoint Configuration
 MODEL_NAME = "imagen-3.0-generate-002"
-API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
+API_BASE_URL = "AIzaSyDODlUSG7KKovWIO9MpNIXIcHp_ZQ0oj30"
 API_URL = f"{API_BASE_URL}{MODEL_NAME}:predict?key={API_KEY}"
 MAX_RETRIES = 5
 
