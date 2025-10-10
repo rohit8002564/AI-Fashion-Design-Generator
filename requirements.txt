@@ -1,3 +1,4 @@
 streamlit
 requests
-Pillow
+pillow
+google-cloud-aiplatform  # If using Vertex AI
